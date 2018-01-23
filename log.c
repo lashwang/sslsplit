@@ -275,6 +275,9 @@ struct log_content_ctx {
 		struct {
 			int fd;
 			char *filename;
+			int fd_info;
+			char *filename_info;
+			size_t pos;
 		} dir;
 		struct {
 			int fd;
@@ -557,6 +560,16 @@ log_content_open(log_content_ctx_t **pctx, opts_t *opts,
 			free(dsthost_clean);
 			goto errout;
 		}
+		if (asprintf(&ctx->u.dir.filename_info, "%s/%s-%s,%s-%s,%s.info",
+		             opts->contentlog, timebuf,
+		             srchost_clean, srcport,
+		             dsthost_clean, dstport) < 0) {
+			log_err_printf("Failed to format filename: %s (%i)\n",
+			               strerror(errno), errno);
+			free(srchost_clean);
+			free(dsthost_clean);
+			goto errout;
+		}
 		free(srchost_clean);
 		free(dsthost_clean);
 	} else if (opts->contentlog_isspec) {
@@ -663,6 +676,15 @@ log_content_dir_opencb(void *fh)
 		               ctx->u.dir.filename, strerror(errno), errno);
 		return -1;
 	}
+	if ((ctx->u.dir.fd_info = privsep_client_openfile(content_clisock,
+	                                             ctx->u.dir.filename_info,
+	                                             0)) == -1) {
+		log_err_printf("Opening logdir file '%s' failed: %s (%i)\n",
+		               ctx->u.dir.filename_info, strerror(errno), errno);
+		return -1;
+	}
+
+	ctx->u.dir.pos = 0;
 	return 0;
 }
 
@@ -673,8 +695,14 @@ log_content_dir_closecb(void *fh)
 
 	if (ctx->u.dir.filename)
 		free(ctx->u.dir.filename);
+	if (ctx->u.dir.filename_info)
+		free(ctx->u.dir.filename_info);
+	
 	if (ctx->u.dir.fd != 1)
 		close(ctx->u.dir.fd);
+	if (ctx->u.dir.fd != 1)
+		close(ctx->u.dir.fd_info);
+
 	free(ctx);
 }
 
@@ -682,12 +710,26 @@ static ssize_t
 log_content_dir_writecb(void *fh, const void *buf, size_t sz)
 {
 	log_content_ctx_t *ctx = fh;
+	char infobuf[128];
 
+	memset(infobuf,0,sizeof(infobuf));
+	
 	if (write(ctx->u.dir.fd, buf, sz) == -1) {
 		log_err_printf("Warning: Failed to write to content log: %s\n",
 		               strerror(errno));
 		return -1;
 	}
+
+	snprintf(infobuf, sizeof(infobuf), "%ld,%ld\n",
+		ctx->u.dir.pos, sz);
+	if (write(ctx->u.dir.fd_info, infobuf, strlen(infobuf)) == -1) {
+		log_err_printf("Warning: Failed to write to info log: %s\n",
+		               strerror(errno));
+		return -1;
+	}
+
+	ctx->u.dir.pos += sz;
+	
 	return sz;
 }
 
